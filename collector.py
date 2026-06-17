@@ -1,6 +1,8 @@
 """Fetch and parse RSS sources into candidate news items."""
 import logging
+import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 import feedparser
 
@@ -31,12 +33,29 @@ def _clean_summary(raw_summary: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def collect_candidates(max_per_source: int = 5) -> list[dict]:
+def _is_recent(entry, max_age_days: int) -> bool:
+    """Return True if the entry's published date is within max_age_days of now,
+    or if it has no parseable date at all (we let undated items through rather
+    than silently dropping them — most Google News entries do have a date)."""
+    struct = getattr(entry, "published_parsed", None)
+    if not struct:
+        return True
+    try:
+        published_dt = datetime.fromtimestamp(time.mktime(struct), tz=timezone.utc)
+    except (OverflowError, ValueError):
+        return True
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=max_age_days)
+    return published_dt >= cutoff
+
+
+def collect_candidates(max_per_source: int = 5, max_age_days: int = 2) -> list[dict]:
     """
     Pull entries from every configured RSS source.
+    Drops anything older than max_age_days (default 2) so we only score fresh news.
     Returns a list of dicts: {title, summary, link, source, query, published}
     """
     candidates = []
+    skipped_old = 0
     for src in get_sources():
         url = src["url"]
         query = src["query"]
@@ -52,7 +71,15 @@ def collect_candidates(max_per_source: int = 5) -> list[dict]:
 
         logger.info("Query '%s': %d entries fetched", query, len(feed.entries))
 
-        for entry in feed.entries[:max_per_source]:
+        kept_for_source = 0
+        for entry in feed.entries:
+            if kept_for_source >= max_per_source:
+                break
+
+            if not _is_recent(entry, max_age_days):
+                skipped_old += 1
+                continue
+
             title = getattr(entry, "title", "").strip()
             link = getattr(entry, "link", "").strip()
             summary = _clean_summary(getattr(entry, "summary", ""))
@@ -72,7 +99,9 @@ def collect_candidates(max_per_source: int = 5) -> list[dict]:
                 "query": query,
                 "published": published,
             })
+            kept_for_source += 1
 
+    logger.info("Dropped %d entries older than %d day(s).", skipped_old, max_age_days)
     return candidates
 
 
