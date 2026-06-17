@@ -1,5 +1,4 @@
-"""Claude relevance scoring for candidate news items."""
-import json
+"""Claude bilingual (RU+UZ) Telegram post writer."""
 import logging
 
 from anthropic import Anthropic
@@ -14,122 +13,64 @@ _client = None
 def _get_client() -> Anthropic:
     global _client
     if _client is None:
-        _client = Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=60.0, max_retries=3)
+        _client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
     return _client
 
 
-SYSTEM_PROMPT = """You are a relevance filter for @batikairuz, a Telegram travel-news channel \
-for Uzbek travelers, aimed at making readers want to keep following the channel.
+SYSTEM_PROMPT = """You write bilingual (Russian + Uzbek) Telegram posts for @batikairuz, a \
+travel-news channel for Uzbek travelers and Batik Air destinations.
 
-DESTINATION PRIORITY (score higher for countries earlier in this list — Malaysia is the \
-top priority since it's the main Batik Air hub; relevance is not limited to this list, but \
-items about these countries should be scored higher when otherwise comparable):
-1. Malaysia (incl. Kuala Lumpur, Langkawi, Penang, KLIA)
-2. Indonesia
-3. Vietnam
-4. Langkawi
-5. Sri Lanka
-6. China
-7. Japan
-8. South Korea
-9. Thailand
-10. Australia
+Goal: every post should feel genuinely useful to a Uzbek traveler — practical, specific, \
+worth acting on — so they keep coming back to the channel for the next post.
 
-CONTENT CATEGORIES considered relevant (any one of these qualifies an item):
-- Events/festivals in KL, Bali, Singapore, or other Batik Air-region cities
-- B2B / business exhibitions abroad (e.g. trade fairs in Guangzhou, China)
-- Opportunities other countries offer to Uzbek citizens (visa-free deals, work/study programs)
-- University news — new programs, scholarships, or opportunities for Uzbek students abroad
-- New parks, attractions, or entertainment venues worth visiting
-- Opportunities or news relevant to tour agencies
-- Hotel industry news in relevant countries
-- New tourist rules — and who they apply to / don't apply to (always say who is affected)
-- Tourism rankings — how a country's tourist satisfaction/popularity is trending
-- Travel trends on social media (Instagram/TikTok) relevant to a destination
-- Aviation industry news worldwide, especially anything Uzbekistan/CIS aviation lacks
-- Major upcoming concerts/events likely to draw tourists to a destination
-- Global travel news/trends worth comparing to Uzbekistan's own travel scene
-- Visa/airport/flight rule changes affecting Uzbek or CIS citizens specifically
+Tone: informative, engaging, channel-style — not robotic. Lead with the angle that matters \
+most to the reader (what changed, what they can do, what to watch out for), not a generic \
+recap. If the news involves a rule, opportunity, or deadline, make clear exactly who it \
+applies to and who it doesn't.
+Never invent facts. Only use what's in the source provided. If a detail isn't in the source, leave it out.
+Keep it tight enough for a Telegram post (no walls of text).
+Always include the source line — the admin verifies against it before approving.
 
-Reject: duplicates of older news, ads/spam, regions with no plausible tie to the above \
-categories or destinations, opinion fluff with no concrete news value.
+Output ONLY the final post text, in exactly this structure (keep the literal separators \
+and emoji, fill in the bracketed parts, omit nothing):
 
-Respond with JSON ONLY, no markdown fences, no extra text, in this exact shape:
-{"relevant": true|false, "score": 0-100, "reason": "short reason", "category": "visa|airport|route|destination|event|exhibition|education|hotel|ranking|social_trend|aviation|concert|rules|other"}
+🇲🇾 [Emoji hook headline]
+
+[2–4 key facts, short lines]
+
+✈️ Почему это важно: [one line — why it matters for the traveler]
+
+──────────
+🇺🇿 [Uzbek version of the same: hook + facts + "Nega muhim:" line]
+
+📍 Источник / Manba: [source name] — [the exact Link given to you, unchanged, as a bare URL]
+#BatikAir #Malaysia #Путешествия #Sayohat
+
+The bare URL in the source line must be copied exactly from the "Link" field you're given — \
+do not shorten it, wrap it in markdown, or alter it. Telegram auto-renders bare URLs as \
+clickable links, so do not add brackets or markdown around it.
+
+Do not add commentary before or after the post. Do not wrap in markdown fences.
 """
 
 
-def score_candidate(candidate: dict) -> dict:
-    """Call Claude to score one candidate. Returns the parsed JSON dict, or a
-    safe default (relevant=False, score=0) if the call or parse fails."""
+def write_post(article: dict) -> str:
+    """Generate the bilingual post text for the chosen article dict
+    (expects title, summary, source, link)."""
     user_content = (
-        f"Title: {candidate['title']}\n"
-        f"Summary: {candidate['summary']}\n"
-        f"Source: {candidate['source']}\n"
-        f"Link: {candidate['link']}\n"
-        f"Matched query: {candidate.get('query', '')}"
+        f"Title: {article['title']}\n"
+        f"Summary: {article['summary']}\n"
+        f"Source: {article['source']}\n"
+        f"Link: {article['link']}"
     )
 
-    try:
-        resp = _get_client().messages.create(
-            model=config.MODEL,
-            max_tokens=300,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
-        )
-        text = resp.content[0].text.strip()
-        # Guard against accidental markdown fencing
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
-        result = json.loads(text)
-        result.setdefault("relevant", False)
-        result.setdefault("score", 0)
-        result.setdefault("reason", "")
-        result.setdefault("category", "other")
-        return result
-    except Exception as e:
-        cause = getattr(e, "__cause__", None)
-        logger.exception(
-            "Relevance scoring failed for '%s' (type=%s, cause=%s)",
-            candidate.get("title", ""), type(e).__name__, cause,
-        )
-        return {
-            "relevant": False,
-            "score": 0,
-            "reason": f"scoring_error: {type(e).__name__}: {cause or e}",
-            "category": "other",
-        }
-
-
-def filter_and_rank(candidates: list[dict], debug_all: list[dict] | None = None) -> list[dict]:
-    """Score every candidate, keep score >= threshold, sort desc, attach score info.
-
-    If debug_all is passed (a list), every scored candidate (pass or fail) is
-    appended to it as {title, score, relevant, reason} so callers can inspect
-    why nothing made the cut.
-    """
-    scored = []
-    for c in candidates:
-        result = score_candidate(c)
-        logger.info(
-            "Scored '%s': relevant=%s score=%s reason=%s",
-            c.get("title", "")[:80], result.get("relevant"), result.get("score"), result.get("reason"),
-        )
-        if debug_all is not None:
-            debug_all.append({
-                "title": c.get("title", ""),
-                "score": result.get("score", 0),
-                "relevant": result.get("relevant", False),
-                "reason": result.get("reason", ""),
-            })
-        if result.get("relevant") and result.get("score", 0) >= config.RELEVANCE_THRESHOLD:
-            item = dict(c)
-            item["score"] = result["score"]
-            item["reason"] = result.get("reason", "")
-            item["category"] = result.get("category", "other")
-            scored.append(item)
-
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored[:config.MAX_CANDIDATES_KEPT]
+    resp = _get_client().messages.create(
+        model=config.MODEL,
+        max_tokens=800,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_content}],
+    )
+    text = resp.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+    return text
