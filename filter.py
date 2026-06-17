@@ -54,82 +54,116 @@ CONTENT CATEGORIES considered relevant (any one of these qualifies an item):
 Reject: duplicates of older news, ads/spam, regions with no plausible tie to the above \
 categories or destinations, opinion fluff with no concrete news value.
 
-Respond with JSON ONLY, no markdown fences, no extra text, in this exact shape:
-{"relevant": true|false, "score": 0-100, "reason": "short reason", "category": "visa|airport|route|destination|event|exhibition|education|hotel|ranking|social_trend|aviation|concert|rules|other"}
+Respond with JSON ONLY, no markdown fences, no extra text. You will be given a NUMBERED LIST \
+of candidates. Return a JSON ARRAY with exactly one object per candidate, in the same order, \
+each shaped like:
+{"index": 0, "relevant": true|false, "score": 0-100, "reason": "short reason", "category": "visa|airport|route|destination|event|exhibition|education|hotel|ranking|social_trend|aviation|concert|rules|other"}
+
+Return ONLY the JSON array, nothing else — no markdown fences, no commentary.
 """
 
 
-def score_candidate(candidate: dict) -> dict:
-    """Call Claude to score one candidate. Returns the parsed JSON dict, or a
-    safe default (relevant=False, score=0) if the call or parse fails."""
-    user_content = (
-        f"Title: {candidate['title']}\n"
-        f"Summary: {candidate['summary']}\n"
-        f"Source: {candidate['source']}\n"
-        f"Link: {candidate['link']}\n"
-        f"Matched query: {candidate.get('query', '')}"
-    )
+def _parse_json_array(text: str) -> list[dict]:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    return json.loads(text)
+
+
+def score_batch(candidates: list[dict]) -> list[dict]:
+    """Score a batch (list) of candidates in a single Claude call. Returns a
+    list of result dicts in the same order as the input. Falls back to
+    relevant=False entries for the whole batch if the call or parse fails."""
+    if not candidates:
+        return []
+
+    lines = []
+    for i, c in enumerate(candidates):
+        lines.append(
+            f"[{i}]\n"
+            f"Title: {c['title']}\n"
+            f"Summary: {c['summary']}\n"
+            f"Source: {c['source']}\n"
+            f"Link: {c['link']}\n"
+            f"Matched query: {c.get('query', '')}"
+        )
+    user_content = "\n\n".join(lines)
 
     try:
         resp = _get_client().messages.create(
-            model=config.MODEL,
-            max_tokens=300,
+            model=config.FILTER_MODEL,
+            max_tokens=300 + 120 * len(candidates),
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         )
         text = resp.content[0].text.strip()
-        # Guard against accidental markdown fencing
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
-        result = json.loads(text)
-        result.setdefault("relevant", False)
-        result.setdefault("score", 0)
-        result.setdefault("reason", "")
-        result.setdefault("category", "other")
-        return result
+        parsed = _parse_json_array(text)
+
+        by_index = {}
+        for item in parsed:
+            idx = item.get("index")
+            if isinstance(idx, int):
+                by_index[idx] = item
+
+        results = []
+        for i in range(len(candidates)):
+            r = by_index.get(i, {})
+            results.append({
+                "relevant": r.get("relevant", False),
+                "score": r.get("score", 0),
+                "reason": r.get("reason", ""),
+                "category": r.get("category", "other"),
+            })
+        return results
     except Exception as e:
         cause = getattr(e, "__cause__", None)
         logger.exception(
-            "Relevance scoring failed for '%s' (type=%s, cause=%s)",
-            candidate.get("title", ""), type(e).__name__, cause,
+            "Batch relevance scoring failed for %d candidates (type=%s, cause=%s)",
+            len(candidates), type(e).__name__, cause,
         )
-        return {
+        return [{
             "relevant": False,
             "score": 0,
             "reason": f"scoring_error: {type(e).__name__}: {cause or e}",
             "category": "other",
-        }
+        } for _ in candidates]
 
 
 def filter_and_rank(candidates: list[dict], debug_all: list[dict] | None = None) -> list[dict]:
-    """Score every candidate, keep score >= threshold, sort desc, attach score info.
+    """Score every candidate in batches (config.FILTER_BATCH_SIZE per Claude call),
+    keep score >= threshold, sort desc, attach score info.
 
     If debug_all is passed (a list), every scored candidate (pass or fail) is
     appended to it as {title, score, relevant, reason} so callers can inspect
     why nothing made the cut.
     """
     scored = []
-    for c in candidates:
-        result = score_candidate(c)
-        logger.info(
-            "Scored '%s': relevant=%s score=%s reason=%s",
-            c.get("title", "")[:80], result.get("relevant"), result.get("score"), result.get("reason"),
-        )
-        if debug_all is not None:
-            debug_all.append({
-                "title": c.get("title", ""),
-                "score": result.get("score", 0),
-                "relevant": result.get("relevant", False),
-                "reason": result.get("reason", ""),
-            })
-        if result.get("relevant") and result.get("score", 0) >= config.RELEVANCE_THRESHOLD:
-            item = dict(c)
-            item["score"] = result["score"]
-            item["reason"] = result.get("reason", "")
-            item["category"] = result.get("category", "other")
-            scored.append(item)
+    batch_size = max(1, config.FILTER_BATCH_SIZE)
+
+    for start in range(0, len(candidates), batch_size):
+        batch = candidates[start:start + batch_size]
+        results = score_batch(batch)
+
+        for c, result in zip(batch, results):
+            logger.info(
+                "Scored '%s': relevant=%s score=%s reason=%s",
+                c.get("title", "")[:80], result.get("relevant"), result.get("score"), result.get("reason"),
+            )
+            if debug_all is not None:
+                debug_all.append({
+                    "title": c.get("title", ""),
+                    "score": result.get("score", 0),
+                    "relevant": result.get("relevant", False),
+                    "reason": result.get("reason", ""),
+                })
+            if result.get("relevant") and result.get("score", 0) >= config.RELEVANCE_THRESHOLD:
+                item = dict(c)
+                item["score"] = result["score"]
+                item["reason"] = result.get("reason", "")
+                item["category"] = result.get("category", "other")
+                scored.append(item)
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:config.MAX_CANDIDATES_KEPT]
