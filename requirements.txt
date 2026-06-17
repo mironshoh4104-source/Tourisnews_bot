@@ -1,0 +1,5 @@
+python-telegram-bot[job-queue]>=21,<22
+feedparser>=6.0,<7
+anthropic>=0.40,<1
+APScheduler>=3.10,<4
+python-dotenv>=1.0,<2

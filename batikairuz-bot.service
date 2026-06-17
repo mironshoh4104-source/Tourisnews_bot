@@ -1,0 +1,15 @@
+[Unit]
+Description=BatikAirUZ Travel News Bot
+After=network.target
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/opt/batikairuz-bot
+ExecStart=/opt/batikairuz-bot/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/batikairuz-bot/.env
+
+[Install]
+WantedBy=multi-user.target
