@@ -233,18 +233,9 @@ async def run_daily_cycle(application: Application):
     await _draft_and_send_next(_Ctx(application), chat_id)
 
 
-def main():
-    config.validate()
-    db.init_db()
-
-    application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("run", cmd_run))
-    application.add_handler(CommandHandler("myid", cmd_myid))
-    application.add_handler(CallbackQueryHandler(on_button))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-
+async def _start_scheduler(application: Application):
+    """post_init hook: runs inside the event loop that run_polling() creates,
+    so AsyncIOScheduler can find a running loop when it starts."""
     scheduler = AsyncIOScheduler(timezone=config.TIMEZONE)
     hour, minute = (int(p) for p in config.RUN_TIME.split(":"))
     scheduler.add_job(
@@ -254,10 +245,28 @@ def main():
         minute=minute,
         args=[application],
     )
-    application.job_queue  # ensures job queue is initialized before scheduler starts alongside it
     scheduler.start()
+    logger.info("Daily cycle scheduled at %s %s.", config.RUN_TIME, config.TIMEZONE)
 
-    logger.info("Bot starting. Daily cycle scheduled at %s %s.", config.RUN_TIME, config.TIMEZONE)
+
+def main():
+    config.validate()
+    db.init_db()
+
+    application = (
+        Application.builder()
+        .token(config.TELEGRAM_BOT_TOKEN)
+        .post_init(_start_scheduler)
+        .build()
+    )
+
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("run", cmd_run))
+    application.add_handler(CommandHandler("myid", cmd_myid))
+    application.add_handler(CallbackQueryHandler(on_button))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
+    logger.info("Bot starting.")
     application.run_polling()
 
 
