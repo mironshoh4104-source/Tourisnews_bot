@@ -14,7 +14,7 @@ _client = None
 def _get_client() -> Anthropic:
     global _client
     if _client is None:
-        _client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        _client = Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=60.0, max_retries=3)
     return _client
 
 
@@ -62,8 +62,17 @@ def score_candidate(candidate: dict) -> dict:
         result.setdefault("category", "other")
         return result
     except Exception as e:
-        logger.warning("Relevance scoring failed for '%s': %s", candidate.get("title", ""), e)
-        return {"relevant": False, "score": 0, "reason": f"scoring_error: {e}", "category": "other"}
+        cause = getattr(e, "__cause__", None)
+        logger.exception(
+            "Relevance scoring failed for '%s' (type=%s, cause=%s)",
+            candidate.get("title", ""), type(e).__name__, cause,
+        )
+        return {
+            "relevant": False,
+            "score": 0,
+            "reason": f"scoring_error: {type(e).__name__}: {cause or e}",
+            "category": "other",
+        }
 
 
 def filter_and_rank(candidates: list[dict], debug_all: list[dict] | None = None) -> list[dict]:
