@@ -11,6 +11,12 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 RUN_TIME = os.getenv("RUN_TIME", "09:00")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Tashkent")
 MODEL = os.getenv("MODEL", "claude-sonnet-4-6")
+# Cheaper/faster model used only for relevance scoring (high volume, low-stakes
+# classification). The bilingual post itself still uses MODEL (Sonnet) above.
+FILTER_MODEL = os.getenv("FILTER_MODEL", "claude-haiku-4-5-20251001")
+# How many candidates to score per Claude call. Batching cuts both cost and
+# wall-clock time dramatically vs. one call per candidate.
+FILTER_BATCH_SIZE = int(os.getenv("FILTER_BATCH_SIZE", "20"))
 
 RELEVANCE_THRESHOLD = 60
 MAX_CANDIDATES_KEPT = 3
