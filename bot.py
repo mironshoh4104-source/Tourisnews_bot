@@ -111,10 +111,15 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(f"Scoring {len(fresh)} candidates with Claude...")
-    ranked = filter_and_rank(fresh)
+    debug_all = []
+    ranked = filter_and_rank(fresh, debug_all=debug_all)
 
     if not ranked:
-        await update.message.reply_text("No candidates scored >= relevance threshold.")
+        top = sorted(debug_all, key=lambda x: x["score"], reverse=True)[:5]
+        lines = ["No candidates scored >= relevance threshold. Top scores seen:"]
+        for d in top:
+            lines.append(f"• {d['score']} — {d['title'][:70]} ({d['reason'][:60]})")
+        await update.message.reply_text("\n".join(lines) if top else "No candidates scored >= relevance threshold. (debug list empty — scoring may have errored on every item)")
         return
 
     context.bot_data[QUEUE_KEY] = ranked
