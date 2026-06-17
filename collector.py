@@ -31,7 +31,7 @@ def _clean_summary(raw_summary: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def collect_candidates(max_per_source: int = 8) -> list[dict]:
+def collect_candidates(max_per_source: int = 5) -> list[dict]:
     """
     Pull entries from every configured RSS source.
     Returns a list of dicts: {title, summary, link, source, query, published}
